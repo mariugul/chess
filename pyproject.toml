@@ -1,0 +1,15 @@
+[project]
+name = "chess_engine"
+version = "0.1.0"
+description = "A simple chess PGN analyzer using Stockfish"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+dependencies = [
+    "chess",
+    "rich"
+]
+requires-python = ">=3.8"
+
+[project.scripts]
+chess = "chess_engine.main:main"
