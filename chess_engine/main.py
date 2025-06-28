@@ -49,7 +49,7 @@ def parse_args(namespace: Args = None) -> Args:
             "Polyglot opening book to use. "
             "You can also provide a custom path."
         ),
-        choices=[' ' + b for b in INCLUDED_BOOKS],
+        choices=INCLUDED_BOOKS,
     )
     return parser.parse_args(namespace=namespace)
 
