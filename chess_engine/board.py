@@ -1,6 +1,7 @@
 import time
 import os
 import chess.pgn
+import argparse
 
 
 def print_board_progress(game, delay=1):
@@ -44,9 +45,11 @@ def print_board_progress(game, delay=1):
 # print_board_progress(game)
 
 if __name__ == "__main__":
-    # Load a PGN file
-    pgn_file = "chess_engine/pgn/139355581344-hihidagar1_vs_mariusgulbrandsen-2025-06-08.pgn"
-    with open(pgn_file) as f:
+    parser = argparse.ArgumentParser(description="Show chess game progress from a PGN file.")
+    parser.add_argument("pgn_file", type=str, help="Path to the PGN file")
+    parser.add_argument("--delay", type=float, default=0, help="Delay between moves in seconds (default: 0)")
+    args = parser.parse_args()
+    with open(args.pgn_file) as f:
         game = chess.pgn.read_game(f)
-    print_board_progress(game, delay=0)  # Adjust delay as needed
+    print_board_progress(game, delay=args.delay)
     print_large_board(game.board())
