@@ -8,6 +8,7 @@ from rich.panel import Panel
 from rich.live import Live
 from rich.table import Table
 import os
+import chess.syzygy
 
 # List of included Polyglot books (without .bin extension for argument choices)
 INCLUDED_BOOKS = [
@@ -51,7 +52,31 @@ def parse_args(namespace: Args = None) -> Args:
         ),
         choices=INCLUDED_BOOKS,
     )
+    parser.add_argument(
+        "--endgame",
+        action="store_true",
+        help="Enable Syzygy endgame tablebase probing using ./tablebases/ directory (3-4-5 piece tablebase only)"
+    )
     return parser.parse_args(namespace=namespace)
+
+# Helper to probe tablebase if available
+def probe_tablebase(board, syzygy_tb):
+    if syzygy_tb is not None and board.is_valid() and board.is_game_over(claim_draw=False) is False:
+        try:
+            if board.is_variant_end():
+                return None, None
+            wdl = syzygy_tb.probe_wdl(board)
+            dtz = None
+            try:
+                dtz = syzygy_tb.probe_dtz(board)
+            except Exception:
+                pass
+            # Map WDL to human-readable
+            wdl_map = {2: "Win", 1: "Cursed Win", 0: "Draw", -1: "Blessed Loss", -2: "Loss"}
+            return wdl_map.get(wdl, str(wdl)), dtz
+        except Exception:
+            return None, None
+    return None, None
 
 def resolve_book_path(book_arg):
     if book_arg is None:
@@ -74,21 +99,44 @@ def get_eval_diff(eval_cp, prev_score):
         return f"{(eval_cp - prev_score)/100:+.2f}"
     return "-"
 
-def get_best_move_info(engine, board, move, eval_cp):
-    best_move = None
-    best_move_str = "-"
-    best_score = None
+def get_best_move_info(engine, board, move, eval_cp, syzygy_tb=None):
+    # Tablebase probe first (limit to 5 pieces)
+    if syzygy_tb is not None and len(board.piece_map()) <= 5:
+        try:
+            moves = list(syzygy_tb.probe_root(board))
+            if moves:
+                best_move = moves[0][0]
+                best_move_str = board.san(best_move)
+                pov_score = None
+                depth = "TB"
+                return best_move, best_move_str, pov_score, depth
+        except Exception:
+            pass
+    # Fallback to engine analysis
     info = engine.analyse(board, chess.engine.Limit(depth=15))
     pov_score: PovScore = info['score']
     depth = info.get('depth', '-')
     best_move = info.get('pv', [None])[0]
+    best_move_str = "-"
     if best_move:
         best_move_str = board.san(best_move)
     return best_move, best_move_str, pov_score, depth
 
-def get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score=None, book_path=None):
+def get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score=None, book_path=None, syzygy_tb=None):
     import chess
     import chess.polyglot
+    # Tablebase probe for accuracy (limit to 5 pieces)
+    if syzygy_tb is not None and len(board.piece_map()) <= 5:
+        try:
+            root_moves = list(syzygy_tb.probe_root(board))
+            if root_moves:
+                tb_moves = [m[0] for m in root_moves]
+                if move in tb_moves:
+                    return "Tablebase"
+                else:
+                    return "Blunder"
+        except Exception:
+            pass
     # Use opening book to classify as 'Book' if in opening and book is provided
     if book_path is not None and book_path.exists():
         try:
@@ -238,7 +286,7 @@ def get_rich_header_table():
     table.add_column("Bar")
     return table
 
-def analyze_game(game, engine, depth, book_path=None):
+def analyze_game(game, engine, depth, book_path=None, syzygy_tb=None):
     board = game.board()
     move_number = 1
     prev_score = None
@@ -255,7 +303,7 @@ def analyze_game(game, engine, depth, book_path=None):
             is_white = (move_number % 2 == 1)
             summary = white_summary if is_white else black_summary
             process_move(
-                board, move, move_number, engine, depth, table, summary, prev_score, book_path
+                board, move, move_number, engine, depth, table, summary, prev_score, book_path, syzygy_tb
             )
             prev_score = get_eval_cp(board, engine, depth)
             board.push(move)
@@ -279,17 +327,28 @@ def init_summary_dict():
         "-": 0
     }
 
-def process_move(board, move, move_number, engine, depth, table, summary, prev_score, book_path=None):
+def process_move(board, move, move_number, engine, depth, table, summary, prev_score, book_path=None, syzygy_tb=None):
     san = board.san(move)
-    info = engine.analyse(board, chess.engine.Limit(depth=depth))
-    pov_score: PovScore = info['score']
-    depth_val = info.get('depth', '-')
-    best_move = info.get('pv', [None])[0]
-    best_move_str = board.san(best_move) if best_move else "-"
-    eval_str, eval_cp = format_eval(pov_score)
-    eval_diff = get_eval_diff(eval_cp, prev_score)
-    accuracy = get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score, book_path)
-    bar = get_progress_bar(eval_cp)
+    # Tablebase probe for eval
+    tb_wdl, tb_dtz = probe_tablebase(board, syzygy_tb)
+    if tb_wdl is not None:
+        eval_str = f"TB: {tb_wdl}"
+        eval_cp = None
+        depth_val = "TB"
+        best_move, best_move_str, _, _ = get_best_move_info(engine, board, move, None, syzygy_tb)
+        eval_diff = "-"
+        accuracy = get_accuracy(move_number, move, best_move, board, engine, None, prev_score, book_path, syzygy_tb)
+        bar = get_progress_bar(None)
+    else:
+        info = engine.analyse(board, chess.engine.Limit(depth=depth))
+        pov_score: PovScore = info['score']
+        depth_val = info.get('depth', '-')
+        best_move = info.get('pv', [None])[0]
+        best_move_str = board.san(best_move) if best_move else "-"
+        eval_str, eval_cp = format_eval(pov_score)
+        eval_diff = get_eval_diff(eval_cp, prev_score)
+        accuracy = get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score, book_path, syzygy_tb)
+        bar = get_progress_bar(eval_cp)
     if accuracy in summary:
         summary[accuracy] += 1
     else:
@@ -374,15 +433,17 @@ def build_summary_table(white, black, white_summary, black_summary):
 def main():
     args = parse_args()
     book_path = resolve_book_path(args.book)
+    syzygy_tb = None
+    if args.endgame:
+        tb_dir = Path(os.path.join(os.path.dirname(__file__), "..", "tablebases")).resolve()
+        if tb_dir.exists():
+            syzygy_tb = chess.syzygy.open_tablebase(str(tb_dir))
     try:
         with args.pgn_file.open() as pgn:
             game = chess.pgn.read_game(pgn)
             engine = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
             print_header(args.pgn_file, game)
-            analyze_game(game, engine, args.depth, book_path)
+            analyze_game(game, engine, args.depth, book_path, syzygy_tb)
             engine.quit()
     except KeyboardInterrupt:
         print("\nAnalysis interrupted by user.")
-
-if __name__ == "__main__":
-    main()
