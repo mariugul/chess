@@ -478,15 +478,12 @@ def main():
         start_time = time.time()  # Start timer
         with args.pgn_file.open() as pgn:
             game = chess.pgn.read_game(pgn)
-            engine = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
-            engine.configure({"Threads": 20})
-            print_header(args.pgn_file, game)
-            # analyze_game will need to return the summaries
-            white_summary = init_summary_dict()
-            black_summary = init_summary_dict()
-            # We'll need to pass these to analyze_game and get them back
-            analyze_game(game, engine, args.depth, book_path, syzygy_tb, white_summary, black_summary)
-            engine.quit()
+            with chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish") as engine:
+                # engine.configure({"Threads": 8, "Hash": 512})  # Optional: cache size in MB (use more for deep analysis)
+                print_header(args.pgn_file, game)
+                white_summary = init_summary_dict()
+                black_summary = init_summary_dict()
+                analyze_game(game, engine, args.depth, book_path, syzygy_tb, white_summary, black_summary)
         elapsed = time.time() - start_time  # Stop timer
         print_summary_panels(game, white_summary, black_summary, elapsed_time=elapsed)
     except KeyboardInterrupt:
