@@ -9,6 +9,7 @@ from rich.live import Live
 from rich.table import Table
 import os
 import chess.syzygy
+import time
 
 # List of included Polyglot books (without .bin extension for argument choices)
 INCLUDED_BOOKS = [
@@ -286,13 +287,14 @@ def get_rich_header_table():
     table.add_column("Bar")
     return table
 
-def analyze_game(game, engine, depth, book_path=None, syzygy_tb=None):
+def analyze_game(game, engine, depth, book_path=None, syzygy_tb=None, white_summary=None, black_summary=None):
     board = game.board()
     move_number = 1
     prev_score = None
-    # Initialize per-player summary
-    white_summary = init_summary_dict()
-    black_summary = init_summary_dict()
+    if white_summary is None:
+        white_summary = init_summary_dict()
+    if black_summary is None:
+        black_summary = init_summary_dict()
     console = Console()
     table = get_rich_header_table()
     panel = Panel(table, title="Game Analysis", border_style="green", expand=False)
@@ -309,8 +311,6 @@ def analyze_game(game, engine, depth, book_path=None, syzygy_tb=None):
             board.push(move)
             move_number += 1
             live.update(panel)
-
-    print_summary_panels(game, white_summary, black_summary)
 
 def init_summary_dict():
     return {
@@ -375,10 +375,10 @@ def get_eval_cp(board, engine, depth):
     _, eval_cp = format_eval(pov_score)
     return eval_cp
 
-def print_summary_panels(game, white_summary, black_summary):
+def print_summary_panels(game, white_summary, black_summary, elapsed_time=None):
     white = game.headers.get("White", "Unknown")
     black = game.headers.get("Black", "Unknown")
-    summary_table = build_summary_table(white, black, white_summary, black_summary)
+    summary_table = build_summary_table(white, black, white_summary, black_summary, elapsed_time)
     console = Console()
     console.print(
         Panel(
@@ -389,7 +389,7 @@ def print_summary_panels(game, white_summary, black_summary):
         )
     )
 
-def build_summary_table(white, black, white_summary, black_summary):
+def build_summary_table(white, black, white_summary, black_summary, elapsed_time=None):
     summary_table = Table.grid(padding=(0, 2))
     summary_table.add_column(justify="right", style="bold")
     summary_table.add_column(justify="center", style="white")
@@ -399,6 +399,29 @@ def build_summary_table(white, black, white_summary, black_summary):
         f"[white]{white}[/white]",
         f"[black]{black}[/black]"
     )
+    # Accuracy values for each label
+    accuracy_values = {
+        "Brilliant": 100,
+        "Great": 95,
+        "Best": 90,
+        "Excellent": 85,
+        "Good": 80,
+        "Book": 80,
+        "Inaccuracy": 60,
+        "Mistake": 40,
+        "Miss": 20,
+        "Blunder": 0
+    }
+    def compute_overall_accuracy(summary):
+        total = 0
+        weighted = 0
+        for key, value in accuracy_values.items():
+            count = summary.get(key, 0)
+            weighted += count * value
+            total += count
+        if total == 0:
+            return "N/A"
+        return f"{weighted / total:.1f}%"
     for key, label in [
         ("Brilliant", "[bold bright_magenta]Brilliant[/bold bright_magenta]"),
         ("Great", "[bold green]Great[/bold green]"),
@@ -428,6 +451,19 @@ def build_summary_table(white, black, white_summary, black_summary):
             f"[{color}]{white_summary[key]}[/{color}]",
             f"[{color}]{black_summary[key]}[/{color}]"
         )
+    # Add overall accuracy row
+    summary_table.add_row(
+        "[bold]Overall Accuracy[/bold]",
+        f"[cyan]{compute_overall_accuracy(white_summary)}[/cyan]",
+        f"[cyan]{compute_overall_accuracy(black_summary)}[/cyan]"
+    )
+    # Add analysis time row if available
+    if elapsed_time is not None:
+        summary_table.add_row(
+            "[bold]Analysis Time[/bold]",
+            f"[magenta]{elapsed_time:.2f} s[/magenta]",
+            ""
+        )
     return summary_table
 
 def main():
@@ -439,11 +475,19 @@ def main():
         if tb_dir.exists():
             syzygy_tb = chess.syzygy.open_tablebase(str(tb_dir))
     try:
+        start_time = time.time()  # Start timer
         with args.pgn_file.open() as pgn:
             game = chess.pgn.read_game(pgn)
             engine = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
+            engine.configure({"Threads": 20})
             print_header(args.pgn_file, game)
-            analyze_game(game, engine, args.depth, book_path, syzygy_tb)
+            # analyze_game will need to return the summaries
+            white_summary = init_summary_dict()
+            black_summary = init_summary_dict()
+            # We'll need to pass these to analyze_game and get them back
+            analyze_game(game, engine, args.depth, book_path, syzygy_tb, white_summary, black_summary)
             engine.quit()
+        elapsed = time.time() - start_time  # Stop timer
+        print_summary_panels(game, white_summary, black_summary, elapsed_time=elapsed)
     except KeyboardInterrupt:
         print("\nAnalysis interrupted by user.")
