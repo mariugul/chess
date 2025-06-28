@@ -5,18 +5,62 @@ import chess.engine
 from chess.engine import PovScore
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 from rich.live import Live
 from rich.table import Table
+import os
+
+# List of included Polyglot books (without .bin extension for argument choices)
+INCLUDED_BOOKS = [
+    "Human",
+    "Titans",
+    "baron30",
+    "varied",
+    "Performance",
+    "Book",
+    "DCbook_large",
+    "Elo2400",
+    "KomodoVariety",
+    "codekiddy",
+    "final-book",
+    "gavibook-small",
+    "gavibook",
+    "gm2600",
+    "komodo",
+]
 
 class Args(argparse.Namespace):
     pgn_file: Path
 
 def parse_args(namespace: Args = None) -> Args:
-    parser = argparse.ArgumentParser(description="Analyze a chess PGN file with Stockfish.")
-    parser.add_argument("pgn_file", type=Path, help="Path to the PGN file to analyze")
-    parser.add_argument("--depth", type=int, default=15, help="Analysis depth for Stockfish (default: 15)")
+    parser = argparse.ArgumentParser(
+        description="Analyze a chess PGN file with Stockfish."
+    )
+    parser.add_argument(
+        "pgn_file", type=Path, help="Path to the PGN file to analyze"
+    )
+    parser.add_argument(
+        "--depth", type=int, default=15, help="Analysis depth for Stockfish (default: 15)"
+    )
+    parser.add_argument(
+        "--book",
+        type=str,
+        default="Human",
+        help=(
+            "Polyglot opening book to use. "
+            "You can also provide a custom path."
+        ),
+        choices=[' ' + b for b in INCLUDED_BOOKS],
+    )
     return parser.parse_args(namespace=namespace)
+
+def resolve_book_path(book_arg):
+    if book_arg is None:
+        return None
+    # If user selected a built-in book, add .bin extension and resolve path
+    if book_arg in INCLUDED_BOOKS:
+        book_filename = book_arg + ".bin"
+        return Path(os.path.join(os.path.dirname(__file__), "..", "books", book_filename)).resolve()
+    return Path(book_arg).expanduser().resolve()
 
 def format_eval(pov_score):
     if pov_score.relative.is_mate():
@@ -42,31 +86,58 @@ def get_best_move_info(engine, board, move, eval_cp):
         best_move_str = board.san(best_move)
     return best_move, best_move_str, pov_score, depth
 
-def get_accuracy(move_number, move, best_move, board, engine, eval_cp):
-    if move_number <= 8:
-        return "Book"
+def get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score=None, book_path=None):
+    import chess
+    import chess.polyglot
+    # Use opening book to classify as 'Book' if in opening and book is provided
+    if book_path is not None and book_path.exists():
+        try:
+            with chess.polyglot.open_reader(str(book_path)) as book:
+                if any(True for entry in book.find(board)):
+                    return "Book"
+        except Exception:
+            pass
+    # If eval_cp is None and not in book, treat as "-" (unclassified)
+    if eval_cp is None:
+        return "-"
+    # Don't penalize forced moves
+    if board.legal_moves.count() == 1:
+        return "Best"
+    # If the position is already lost/won, be more forgiving
+    if prev_score is not None and abs(prev_score / 100) > 5.0:
+        return "-"
     elif best_move and move == best_move:
-        # You could add logic to detect "Brilliant" or "Great" here
-        # For example, if the move is a sacrifice or a hard-to-find tactic
-        # For now, just return "Best"
         return "Best"
     elif best_move:
         board.push(best_move)
         best_info = engine.analyse(board, chess.engine.Limit(depth=15))
         best_score = best_info['score'].relative.score(mate_score=100000)
         board.pop()
-        if eval_cp is not None and best_score is not None:
-            diff = abs((eval_cp - best_score) / 100)
-            # Example thresholds (tune as needed)
-            if diff < 0.1:
+        # If either move or best move is mate, don't classify as blunder
+        if (best_info['score'].relative.is_mate() or
+            (isinstance(eval_cp, (int, float)) and abs(eval_cp) > 10000)):
+            return "-"
+        if eval_cp is not None and prev_score is not None:
+            # Calculate centipawn loss from the perspective of the player making the move
+            # If white to move, loss = prev_score - eval_cp; if black, loss = eval_cp - prev_score
+            is_white = (move_number % 2 == 1)
+            if is_white:
+                loss = (prev_score - eval_cp) / 100
+            else:
+                loss = (eval_cp - prev_score) / 100
+            # If the move improves the position, it's Excellent (but not in book)
+            if loss <= 0.0:
                 return "Excellent"
-            elif diff < 0.3:
+            # More forgiving: <0.35: Excellent, <2.0: Good, <2.5: Inaccuracy, <3.5: Mistake, <6.0: Miss, >=6.0: Blunder
+            if loss < 0.35:
+                return "Excellent"
+            elif loss < 2.0:
                 return "Good"
-            elif diff < 0.7:
+            elif loss < 2.5:
                 return "Inaccuracy"
-            elif diff < 1.5:
+            elif loss < 3.5:
                 return "Mistake"
-            elif diff < 3.0:
+            elif loss < 6.0:
                 return "Miss"
             else:
                 return "Blunder"
@@ -167,26 +238,31 @@ def get_rich_header_table():
     table.add_column("Bar")
     return table
 
-def analyze_game(game, engine, depth):
+def analyze_game(game, engine, depth, book_path=None):
     board = game.board()
     move_number = 1
     prev_score = None
-    summary = init_summary_dict()
+    # Initialize per-player summary
+    white_summary = init_summary_dict()
+    black_summary = init_summary_dict()
     console = Console()
     table = get_rich_header_table()
     panel = Panel(table, title="Game Analysis", border_style="green", expand=False)
 
     with Live(panel, console=console, refresh_per_second=2) as live:
         for move in game.mainline_moves():
+            # Determine which player made the move
+            is_white = (move_number % 2 == 1)
+            summary = white_summary if is_white else black_summary
             process_move(
-                board, move, move_number, engine, depth, table, summary, prev_score
+                board, move, move_number, engine, depth, table, summary, prev_score, book_path
             )
             prev_score = get_eval_cp(board, engine, depth)
             board.push(move)
             move_number += 1
             live.update(panel)
 
-    print_summary_panels(game, summary)
+    print_summary_panels(game, white_summary, black_summary)
 
 def init_summary_dict():
     return {
@@ -203,7 +279,7 @@ def init_summary_dict():
         "-": 0
     }
 
-def process_move(board, move, move_number, engine, depth, table, summary, prev_score):
+def process_move(board, move, move_number, engine, depth, table, summary, prev_score, book_path=None):
     san = board.san(move)
     info = engine.analyse(board, chess.engine.Limit(depth=depth))
     pov_score: PovScore = info['score']
@@ -212,7 +288,7 @@ def process_move(board, move, move_number, engine, depth, table, summary, prev_s
     best_move_str = board.san(best_move) if best_move else "-"
     eval_str, eval_cp = format_eval(pov_score)
     eval_diff = get_eval_diff(eval_cp, prev_score)
-    accuracy = get_accuracy(move_number, move, best_move, board, engine, eval_cp)
+    accuracy = get_accuracy(move_number, move, best_move, board, engine, eval_cp, prev_score, book_path)
     bar = get_progress_bar(eval_cp)
     if accuracy in summary:
         summary[accuracy] += 1
@@ -240,10 +316,9 @@ def get_eval_cp(board, engine, depth):
     _, eval_cp = format_eval(pov_score)
     return eval_cp
 
-def print_summary_panels(game, summary):
+def print_summary_panels(game, white_summary, black_summary):
     white = game.headers.get("White", "Unknown")
     black = game.headers.get("Black", "Unknown")
-    white_summary, black_summary = count_player_moves(game, summary)
     summary_table = build_summary_table(white, black, white_summary, black_summary)
     console = Console()
     console.print(
@@ -254,24 +329,6 @@ def print_summary_panels(game, summary):
             expand=False
         )
     )
-
-def count_player_moves(game, summary):
-    white_summary = {k: 0 for k in summary}
-    black_summary = {k: 0 for k in summary}
-    move_number = 1
-    for move in game.mainline_moves():
-        acc = "Book" if move_number <= 8 else "-"
-        if move_number % 2 == 1:
-            white_summary[acc] += 1
-        else:
-            black_summary[acc] += 1
-        move_number += 1
-    for k in summary:
-        total = summary[k]
-        if k != "Book":
-            white_summary[k] = total // 2
-            black_summary[k] = total - white_summary[k]
-    return white_summary, black_summary
 
 def build_summary_table(white, black, white_summary, black_summary):
     summary_table = Table.grid(padding=(0, 2))
@@ -316,12 +373,13 @@ def build_summary_table(white, black, white_summary, black_summary):
 
 def main():
     args = parse_args()
+    book_path = resolve_book_path(args.book)
     try:
         with args.pgn_file.open() as pgn:
             game = chess.pgn.read_game(pgn)
             engine = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
             print_header(args.pgn_file, game)
-            analyze_game(game, engine, args.depth)
+            analyze_game(game, engine, args.depth, book_path)
             engine.quit()
     except KeyboardInterrupt:
         print("\nAnalysis interrupted by user.")
