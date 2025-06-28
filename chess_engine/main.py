@@ -58,6 +58,18 @@ def parse_args(namespace: Args = None) -> Args:
         action="store_true",
         help="Enable Syzygy endgame tablebase probing using ./tablebases/ directory (3-4-5 piece tablebase only)"
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of threads for Stockfish engine (default: 1)"
+    )
+    parser.add_argument(
+        "--cache",
+        type=int,
+        default=512,
+        help="Hash size (MB) for Stockfish engine cache (default: 512)"
+    )
     return parser.parse_args(namespace=namespace)
 
 # Helper to probe tablebase if available
@@ -478,8 +490,9 @@ def main():
         start_time = time.time()  # Start timer
         with args.pgn_file.open() as pgn:
             game = chess.pgn.read_game(pgn)
-            with chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish") as engine:
-                # engine.configure({"Threads": 8, "Hash": 512})  # Optional: cache size in MB (use more for deep analysis)
+            engine = chess.engine.SimpleEngine.popen_uci("/usr/games/stockfish")
+            engine.configure({"Threads": args.threads, "Hash": args.cache})
+            with engine:
                 print_header(args.pgn_file, game)
                 white_summary = init_summary_dict()
                 black_summary = init_summary_dict()
